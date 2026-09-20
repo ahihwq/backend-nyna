@@ -245,6 +245,33 @@ Future<bool> _sendSendGrid(EmailPayload payload) async {
 /// Default real senders (read secrets from the environment at call time).
 final PushSender defaultPushSender = _sendFcm;
 final EmailSender defaultEmailSender = _sendSendGrid;
+
+/// Mock reminder scheduler. A production implementation would persist this
+/// job in a queue; the mock keeps the process-local timer for end-to-end demos.
+void scheduleBookingReminder({
+  required String userId,
+  required String userName,
+  required String startTimeIso,
+  required String bookingId,
+  PushSender? push,
+}) {
+  final scheduledAt = DateTime.tryParse(startTimeIso);
+  if (scheduledAt == null) return;
+  final delay = scheduledAt.toUtc().difference(DateTime.now().toUtc());
+  if (delay <= Duration.zero) return;
+  Timer(delay, () async {
+    final sender = push ?? defaultPushSender;
+    await retryWithBackoff(
+      channel: 'reminder',
+      attempt: () => sender(FcmPayload(
+        title: 'Nhắc lịch tư vấn',
+        body: 'Chào $userName, đã đến giờ tư vấn của bạn.',
+        data: {'userId': userId, 'bookingId': bookingId, 'kind': 'reminder'},
+        topic: 'user_$userId',
+      )),
+    );
+  });
+}
 /// Result report for a notification dispatch attempt.
 class NotificationReport {
   const NotificationReport({

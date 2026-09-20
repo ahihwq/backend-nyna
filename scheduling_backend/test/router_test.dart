@@ -43,6 +43,86 @@ void main() {
       expect(first['remaining'], 2);
     });
 
+    test('GET /api/health returns the scheduling service health contract', () async {
+      final response = await controller.handle(const HandlerRequest(
+        method: 'GET',
+        path: '/api/health',
+      ));
+      expect(response.statusCode, 200);
+      expect(jsonDecode(response.body!), {
+        'ok': true,
+        'service': 'scheduling',
+      });
+    });
+
+    test('OPTIONS returns CORS headers for Flutter Web', () async {
+      final response = await controller.handle(const HandlerRequest(
+        method: 'OPTIONS',
+        path: '/api/slots',
+      ));
+      expect(response.statusCode, 204);
+      expect(response.headers['Access-Control-Allow-Origin'], '*');
+      expect(response.headers['Access-Control-Allow-Methods'], contains('POST'));
+      expect(response.headers['Access-Control-Allow-Headers'], contains('Authorization'));
+    });
+
+    test('bulk draft slots stay private until published', () async {
+      final created = await controller.handle(jsonPost(
+        '/api/admin/slots/bulk',
+        '{"slots":[{"startTime":"2026-08-28T11:00:00.000",'
+            '"endTime":"2026-08-28T11:45:00.000"}],"capacity":5}',
+        headers: {'authorization': 'Bearer dev-token'},
+      ));
+      expect(created.statusCode, 201);
+      final id = (jsonDecode(created.body!)['ids'] as List).single as String;
+
+      final publicBefore = await controller.handle(HandlerRequest(
+        method: 'GET',
+        path: '/api/slots',
+        query: {'date': '2026-08-28'},
+      ));
+      expect(jsonDecode(publicBefore.body!)['slots'], isEmpty);
+
+      final admin = await controller.handle(HandlerRequest(
+        method: 'GET',
+        path: '/api/admin/slots',
+        query: {'date': '2026-08-28'},
+        headers: const {'authorization': 'Bearer dev-token'},
+      ));
+      expect((jsonDecode(admin.body!)['slots'] as List).single['id'], id);
+
+      final published = await controller.handle(jsonPost(
+        '/api/admin/slots/publish',
+        '{"slotIds":["$id"]}',
+        headers: {'authorization': 'Bearer dev-token'},
+      ));
+      expect(published.statusCode, 200);
+
+      final publicAfter = await controller.handle(HandlerRequest(
+        method: 'GET',
+        path: '/api/slots',
+        query: {'date': '2026-08-28'},
+      ));
+      expect((jsonDecode(publicAfter.body!)['slots'] as List).single['id'], id);
+    });
+
+    test('bulk creation does not duplicate the same date and time', () async {
+      const body = '{"slots":[{"startTime":"2026-08-28T11:00:00.000",'
+          '"endTime":"2026-08-28T11:45:00.000"}],"capacity":5}';
+      final first = await controller.handle(jsonPost(
+        '/api/admin/slots/bulk', body,
+        headers: {'authorization': 'Bearer dev-token'},
+      ));
+      final second = await controller.handle(jsonPost(
+        '/api/admin/slots/bulk', body,
+        headers: {'authorization': 'Bearer dev-token'},
+      ));
+      expect(first.statusCode, 201);
+      expect(second.statusCode, 201);
+      expect(jsonDecode(first.body!)['ids'], jsonDecode(second.body!)['ids']);
+      expect(store.allSlots(), hasLength(5));
+    });
+
     test('POST /api/bookings → 201 with {bookingId, slotId, userId, createdAt}', () async {
       final response = await controller.handle(jsonPost(
         '/api/bookings',

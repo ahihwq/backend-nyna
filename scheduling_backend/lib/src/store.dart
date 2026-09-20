@@ -21,6 +21,7 @@ class Slot {
     required this.startTime,
     required this.endTime,
     required this.capacity,
+    this.published = false,
     this.adminNote,
   }) {
     if (capacity < 1) {
@@ -35,6 +36,7 @@ class Slot {
   final DateTime startTime;
   final DateTime endTime;
   final int capacity;
+  final bool published;
   final String? adminNote;
 
   int registrationCount(List<Booking> bookings) =>
@@ -49,6 +51,7 @@ class Slot {
       'startTime': startTime.toIso8601String(),
       'endTime': endTime.toIso8601String(),
       'capacity': capacity,
+      'published': published,
       'adminNote': adminNote,
       'taken': taken,
       'remaining': remaining,
@@ -60,6 +63,7 @@ class Slot {
         startTime: DateTime.parse(json['startTime'] as String),
         endTime: DateTime.parse(json['endTime'] as String),
         capacity: json['capacity'] as int,
+        published: json['published'] as bool? ?? false,
         adminNote: json['adminNote'] as String?,
       );
 }
@@ -186,15 +190,21 @@ class AppointmentStore {
     required DateTime startTime,
     required DateTime endTime,
     required int capacity,
+    bool published = false,
     String? adminNote,
   }) {
     return _lock.synchronize(() async {
+      final existing = _slots.values.where(
+        (slot) => slot.startTime == startTime && slot.endTime == endTime,
+      );
+      if (existing.isNotEmpty) return existing.first.id;
       _slotCounter++;
       final slot = Slot(
         id: 's$_slotCounter',
         startTime: startTime,
         endTime: endTime,
         capacity: capacity,
+        published: published,
         adminNote: adminNote,
       );
       _slots[slot.id] = slot;
@@ -216,6 +226,7 @@ class AppointmentStore {
         startTime: old.startTime,
         endTime: old.endTime,
         capacity: capacity,
+        published: old.published,
         adminNote: old.adminNote,
       );
     });
@@ -246,6 +257,7 @@ class AppointmentStore {
           startTime: DateTime(day.year, day.month, day.day, h, 0),
           endTime: DateTime(day.year, day.month, day.day, h, 45),
           capacity: capacity,
+          published: true,
           adminNote: 'Tư vấn tâm lý 45 phút',
         );
         _slots[slot.id] = slot;
@@ -259,9 +271,10 @@ class AppointmentStore {
 
   Slot? slotById(String slotId) => _slots[slotId];
 
-  List<Slot> slotsForDate(DateTime date) {
+  List<Slot> slotsForDate(DateTime date, {bool publishedOnly = true}) {
     return _slots.values
         .where((s) =>
+            (!publishedOnly || s.published) &&
             s.startTime.year == date.year &&
             s.startTime.month == date.month &&
             s.startTime.day == date.day)
@@ -270,6 +283,24 @@ class AppointmentStore {
   }
 
   List<Slot> allSlots() => _slots.values.toList();
+
+  Future<void> publishSlots(Iterable<String> slotIds) {
+    final ids = slotIds.toSet();
+    return _lock.synchronize(() async {
+      for (final id in ids) {
+        final old = _slots[id];
+        if (old == null) continue;
+        _slots[id] = Slot(
+          id: old.id,
+          startTime: old.startTime,
+          endTime: old.endTime,
+          capacity: old.capacity,
+          published: true,
+          adminNote: old.adminNote,
+        );
+      }
+    });
+  }
 
   List<Booking> bookingsForSlot(String slotId) {
     return _bookings.where((b) => b.slotId == slotId).toList()

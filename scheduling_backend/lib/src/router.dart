@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'store.dart' show AppointmentStore, Booking, BookingSlotFull,
     BookingInvalid, BookingCreated, BookingResult, BookingSlotNotFound,
     BookingDuplicate, Slot;
+import 'notifications.dart' show scheduleBookingReminder;
 
 /// A normalized incoming HTTP request.
 class HandlerRequest {
@@ -142,11 +143,47 @@ class AppController {
           : HandlerResponse.methodNotAllowed;
     }
 
+    if (segs.length == 3 &&
+        segs[0] == 'api' &&
+        segs[1] == 'admin' &&
+        segs[2] == 'slots') {
+      if (_authorize(request) != AuthKind.authorized) return _unauthorized();
+      if (request.method == 'GET') return _handleGetAdminSlots(request);
+      if (request.method == 'POST') return _handleCreateSlot(request);
+      return HandlerResponse.methodNotAllowed;
+    }
+
+    if (segs.length == 4 &&
+        segs[0] == 'api' &&
+        segs[1] == 'admin' &&
+        segs[2] == 'slots' &&
+        segs[3] == 'bulk') {
+      if (request.method != 'POST') return HandlerResponse.methodNotAllowed;
+      if (_authorize(request) != AuthKind.authorized) return _unauthorized();
+      return _handleCreateSlots(request);
+    }
+
+    if (segs.length == 4 &&
+        segs[0] == 'api' &&
+        segs[1] == 'admin' &&
+        segs[2] == 'slots' &&
+        segs[3] == 'publish') {
+      if (request.method != 'POST') return HandlerResponse.methodNotAllowed;
+      if (_authorize(request) != AuthKind.authorized) return _unauthorized();
+      return _handlePublishSlots(request);
+    }
+
     if (segs.length == 2 && segs[0] == 'api' && segs[1] == 'bookings') {
       if (request.method != 'POST') return HandlerResponse.methodNotAllowed;
       final auth = _authorize(request);
       if (auth != AuthKind.authorized) return _unauthorized();
       return _handleCreateBooking(request);
+    }
+
+    if (segs.length == 2 && segs[0] == 'api' && segs[1] == 'reminders') {
+      if (request.method != 'POST') return HandlerResponse.methodNotAllowed;
+      if (_authorize(request) != AuthKind.authorized) return _unauthorized();
+      return _handleScheduleReminder(request);
     }
 
     if (segs.length == 4 &&
@@ -167,16 +204,6 @@ class AppController {
       final auth = _authorize(request);
       if (auth != AuthKind.authorized) return _unauthorized();
       return _handleUserBookings(Uri.decodeQueryComponent(segs[2]));
-    }
-
-    if (segs.length == 3 &&
-        segs[0] == 'api' &&
-        segs[1] == 'admin' &&
-        segs[2] == 'slots') {
-      if (request.method != 'POST') return HandlerResponse.methodNotAllowed;
-      final auth = _authorize(request);
-      if (auth != AuthKind.authorized) return _unauthorized();
-      return _handleCreateSlot(request);
     }
 
     return HandlerResponse.notFound;
@@ -211,7 +238,7 @@ class AppController {
           corsHeaders,
         );
       }
-      slots = store.slotsForDate(parsed);
+      slots = store.slotsForDate(parsed, publishedOnly: true);
     } else {
       slots = store.allSlots()
         ..sort((a, b) => a.startTime.compareTo(b.startTime));
@@ -225,6 +252,20 @@ class AppController {
           return json;
         }).toList(),
       },
+      corsHeaders,
+    );
+  }
+
+  HandlerResponse _handleGetAdminSlots(HandlerRequest request) {
+    final dateParam = request.query['date'] ?? '';
+    final slots = dateParam.isEmpty
+        ? store.allSlots()
+        : (DateTime.tryParse(dateParam) == null
+            ? <Slot>[]
+            : store.slotsForDate(DateTime.parse(dateParam), publishedOnly: false));
+    return HandlerResponse.json(
+      200,
+      {'slots': slots.map((s) => s.toJson(store.bookingsForSlot(s.id))).toList()},
       corsHeaders,
     );
   }
@@ -360,11 +401,45 @@ HandlerResponse _invalidField(String field) => HandlerResponse.json(
       200,
       {
         'userId': userId,
-        'bookings': bookings.map((b) => b.toJson()).toList(),
+        'bookings': bookings.map((b) {
+          final json = b.toJson();
+          final slot = store.slotById(b.slotId);
+          json['startTime'] = slot?.startTime.toIso8601String();
+          json['endTime'] = slot?.endTime.toIso8601String();
+          return json;
+        }).toList(),
         'count': bookings.length,
       },
       corsHeaders,
     );
+  }
+
+  Future<HandlerResponse> _handleScheduleReminder(HandlerRequest request) async {
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode((request.body ?? '').isEmpty ? '{}' : request.body!) as
+          Map<String, dynamic>;
+    } on FormatException {
+      return HandlerResponse.json(400, {'error': 'JSON không hợp lệ.'}, corsHeaders);
+    }
+    final slotId = body['slotId'] as String?;
+    final userId = body['userId'] as String?;
+    final userName = body['userName'] as String?;
+    final bookingId = body['bookingId'] as String?;
+    final slot = slotId == null ? null : store.slotById(slotId);
+    if (slot == null || userId == null || userName == null || bookingId == null) {
+      return HandlerResponse.json(400, {'error': 'Thông tin nhắc lịch chưa đầy đủ.'}, corsHeaders);
+    }
+    scheduleBookingReminder(
+      userId: userId,
+      userName: userName,
+      startTimeIso: slot.startTime.toIso8601String(),
+      bookingId: bookingId,
+    );
+    return HandlerResponse.json(202, {
+      'scheduled': true,
+      'message': 'Đã lên lịch nhắc tư vấn cho người dùng.',
+    }, corsHeaders);
   }
 
   Future<HandlerResponse> _handleCreateSlot(HandlerRequest request) async {
@@ -408,5 +483,62 @@ HandlerResponse _invalidField(String field) => HandlerResponse.json(
       adminNote: body['adminNote'] as String?,
     );
     return HandlerResponse.json(201, {'id': id, 'created': true}, corsHeaders);
+  }
+
+  Future<HandlerResponse> _handleCreateSlots(HandlerRequest request) async {
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode((request.body ?? '').isEmpty ? '{}' : request.body!) as
+          Map<String, dynamic>;
+    } on FormatException {
+      return HandlerResponse.json(400, {'error': 'JSON không hợp lệ.'}, corsHeaders);
+    }
+    final rawSlots = body['slots'];
+    final capacity = (body['capacity'] as num?)?.toInt() ?? 1;
+    if (rawSlots is! List || rawSlots.isEmpty || capacity < 1) {
+      return HandlerResponse.json(
+        400,
+        {'error': 'Cần có danh sách khung giờ và sức chứa hợp lệ.'},
+        corsHeaders,
+      );
+    }
+    final ids = <String>[];
+    for (final item in rawSlots) {
+      if (item is! Map<String, dynamic>) {
+        return HandlerResponse.json(400, {'error': 'Khung giờ không hợp lệ.'}, corsHeaders);
+      }
+      final start = DateTime.tryParse(item['startTime'] as String? ?? '');
+      final end = DateTime.tryParse(item['endTime'] as String? ?? '');
+      if (start == null || end == null || !end.isAfter(start)) {
+        return HandlerResponse.json(400, {'error': 'Thời gian khung giờ không hợp lệ.'}, corsHeaders);
+      }
+      ids.add(await store.addSlot(
+        startTime: start,
+        endTime: end,
+        capacity: capacity,
+        adminNote: body['adminNote'] as String?,
+      ));
+    }
+    return HandlerResponse.json(201, {'ids': ids, 'created': true}, corsHeaders);
+  }
+
+  Future<HandlerResponse> _handlePublishSlots(HandlerRequest request) async {
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode((request.body ?? '').isEmpty ? '{}' : request.body!) as
+          Map<String, dynamic>;
+    } on FormatException {
+      return HandlerResponse.json(400, {'error': 'JSON không hợp lệ.'}, corsHeaders);
+    }
+    final rawIds = body['slotIds'];
+    if (rawIds is! List || rawIds.any((id) => id is! String)) {
+      return HandlerResponse.json(400, {'error': 'Danh sách khung giờ không hợp lệ.'}, corsHeaders);
+    }
+    final ids = rawIds.cast<String>();
+    await store.publishSlots(ids);
+    return HandlerResponse.json(200, {
+      'published': ids,
+      'message': 'Các khung giờ đã được công bố cho người dùng.',
+    }, corsHeaders);
   }
 }

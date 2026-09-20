@@ -105,6 +105,7 @@ class SchedulingServer {
 
   Future<void> _handleSse(HttpRequest request) async {
     final response = request.response;
+    response.bufferOutput = false;
     response.statusCode = 200;
     response.headers.contentType =
         ContentType('text', 'event-stream', charset: 'utf-8');
@@ -120,7 +121,10 @@ class SchedulingServer {
     });
     try {
       await flush(response);
-      await response.done;
+      // An SSE response must remain open until the client disconnects.
+      // HttpResponse.done describes the server response lifecycle and may
+      // complete after the initial flush, before the next booking event.
+      await Completer<void>().future;
     } on Exception catch (_) {
       // Client disconnected (or stream closed); nothing to do.
     } finally {
